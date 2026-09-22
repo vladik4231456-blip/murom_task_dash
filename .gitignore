@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+data/
+__pycache__/
+*.py[cod]
+*.backup-*
+.DS_Store
+npm-debug.log*

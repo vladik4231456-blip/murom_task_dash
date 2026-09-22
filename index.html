@@ -1,11 +1,176 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ДYO — доска объявлений Мурома</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 </head>
 <body>
-    
+  <div class="app">
+
+    <header class="header">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 96 42" role="img" aria-label="ДYO" fill="none"
+             stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 36V31H12C15 27 16 19 16 8H30V31H33V36"/>
+          <path d="M30 8H38"/>
+          <path class="y" d="M38 8L50 22L62 8M50 22V35"/>
+          <path d="M62 8H78"/>
+          <circle cx="78" cy="21" r="13"/>
+        </svg>
+        <div class="subtitle">доска объявлений Мурома</div>
+      </div>
+      <div class="head-actions">
+        <button class="auth-btn" id="authBtn" type="button">Войти</button>
+        <button class="admin-btn hidden" id="adminBtn" type="button">Админ-панель</button>
+        <button class="theme-btn" id="themeBtn" type="button" aria-label="Переключить тему">🌙</button>
+      </div>
+    </header>
+
+    <input class="search" id="searchInput" type="search" placeholder="Поиск по объявлениям" autocomplete="off" name="site-search" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+    <main id="board"></main>
+  </div>
+
+  <button class="fab" id="fab" type="button" aria-label="Добавить объявление">+</button>
+
+  <div class="toast" id="toast" role="status">
+    <span id="toastText"></span>
+    <button type="button" id="toastUndo">Отменить</button>
+  </div>
+
+  <!-- Новое объявление -->
+  <div class="overlay" id="overlay" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-head">
+        <h2 id="modalTitle">Новое объявление</h2>
+        <button class="close-btn" id="closeBtn" type="button" aria-label="Закрыть">×</button>
+      </div>
+
+      <label class="field">
+        <span class="field-label">Заголовок <em id="titleCount">0/60</em></span>
+        <input id="titleInput" type="text" maxlength="60" placeholder="Например: Продам самокат" autocomplete="off">
+      </label>
+
+      <label class="field">
+        <span class="field-label">Текст объявления <em id="textCount">0/300</em></span>
+        <textarea id="textInput" rows="4" maxlength="300" placeholder="Что, где, в каком состоянии"></textarea>
+      </label>
+
+      <p class="field-note">Объявление будет опубликовано на 24 часа.</p>
+
+      <div class="error" id="error" role="alert"></div>
+
+      <div class="actions">
+        <button class="btn" id="cancelBtn" type="button">Отмена</button>
+        <button class="btn primary" id="publishBtn" type="button">Опубликовать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Просмотр объявления -->
+  <div class="overlay" id="viewOverlay" aria-hidden="true">
+    <div class="modal view" role="dialog" aria-modal="true" aria-labelledby="viewTitle">
+      <div class="modal-head">
+        <span class="view-meta" id="viewMeta"></span>
+        <button class="close-btn" id="viewClose" type="button" aria-label="Закрыть">×</button>
+      </div>
+
+      <h2 class="view-title" id="viewTitle"></h2>
+      <p class="view-text" id="viewText"></p>
+
+      <div class="view-actions">
+        <button class="act" id="likeBtn" type="button" aria-label="Нравится">
+          <span id="likeIcon">♡</span><span id="likeCount">0</span>
+        </button>
+        <button class="act" id="commentJump" type="button" aria-label="Комментарии">
+          💬<span id="commentCount">0</span>
+        </button>
+      </div>
+
+      <h3 class="comments-title" id="commentsTitle">Комментарии</h3>
+      <div id="commentList"></div>
+
+      <div class="comment-form">
+        <input id="commentInput" type="text" maxlength="200" placeholder="Написать комментарий" autocomplete="off">
+        <button class="btn primary" id="commentSend" type="button">Отправить</button>
+      </div>
+      <div class="error" id="commentError" role="alert"></div>
+
+      <button class="report" id="reportBtn" type="button">🚩 Пожаловаться</button>
+    </div>
+  </div>
+
+  <!-- Авторизация -->
+  <div class="overlay" id="authOverlay" aria-hidden="true">
+    <div class="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <div class="modal-head">
+        <h2 id="authTitle">Вход</h2>
+        <button class="close-btn" id="authClose" type="button" aria-label="Закрыть">×</button>
+      </div>
+
+      <div class="choice auth-tabs" id="authTabs" role="tablist" aria-label="Форма авторизации">
+        <button class="chip active" type="button" data-auth="login">Войти</button>
+        <button class="chip" type="button" data-auth="register">Регистрация</button>
+      </div>
+
+      <label class="field auth-field hidden" id="authNameWrap">
+        <span class="field-label">Имя</span>
+        <input id="authName" type="text" maxlength="60" placeholder="Ваше имя" autocomplete="off" name="user_name">
+      </label>
+
+      <label class="field">
+        <span class="field-label">Email</span>
+        <input id="authEmail" type="email" placeholder="you@example.com" autocomplete="username" name="user_email">
+      </label>
+
+      <label class="field">
+        <span class="field-label">Пароль</span>
+        <input id="authPassword" type="password" placeholder="Минимум 6 символов" autocomplete="current-password" name="user_password">
+      </label>
+
+      <div class="error" id="authError" role="alert"></div>
+
+      <button class="btn primary" id="authSubmit" type="button">Войти</button>
+    </div>
+  </div>
+
+  <!-- Панель администратора -->
+  <div class="overlay" id="adminOverlay" aria-hidden="true">
+    <div class="modal admin-modal" role="dialog" aria-modal="true" aria-labelledby="adminTitle">
+      <div class="modal-head">
+        <h2 id="adminTitle">Админ-панель</h2>
+        <button class="close-btn" id="adminClose" type="button" aria-label="Закрыть">×</button>
+      </div>
+
+      <h3 class="admin-section-title">Жалобы</h3>
+      <button class="btn" id="adminReportsBtn" type="button">Обновить жалобы</button>
+      <div class="error" id="adminReportsError" role="alert"></div>
+      <div id="adminReports"></div>
+    </div>
+  </div>
+
+  <div class="overlay" id="editOverlay" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="editTitleLabel">
+      <div class="modal-head">
+        <h2 id="editTitleLabel">Редактировать объявление</h2>
+        <button class="close-btn" id="editClose" type="button" aria-label="Закрыть">×</button>
+      </div>
+      <label class="field">
+        <span class="field-label">Заголовок</span>
+        <input id="editPostTitle" type="text" maxlength="60" autocomplete="off">
+      </label>
+      <label class="field">
+        <span class="field-label">Текст</span>
+        <textarea id="editPostText" rows="5" maxlength="300"></textarea>
+      </label>
+      <div class="error" id="editError" role="alert"></div>
+      <button class="btn primary" id="editSave" type="button">Сохранить изменения</button>
+    </div>
+  </div>
+
+<script src="script.js"></script>
 </body>
 </html>
