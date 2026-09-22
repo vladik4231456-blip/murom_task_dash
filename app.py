@@ -1,8 +1,11 @@
 import os
+import random
 import re
+import smtplib
 import sqlite3
 import time
 import uuid
+from email.message import EmailMessage
 from pathlib import Path
 
 import jwt
@@ -28,9 +31,62 @@ IS_PRODUCTION = os.getenv('FLASK_ENV', '').lower() == 'production'
 SEED_DEMO_DATA = os.getenv('SEED_DEMO_DATA', '0') == '1'
 CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', '').split(',') if origin.strip()]
 DAY_MS = 24 * 60 * 60 * 1000
+EMAIL_RE = re.compile(r'^[A-Za-z0-9.!#$%&\'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$')
 
 if IS_PRODUCTION and (JWT_SECRET == 'murom-dev-secret-change-me' or not ADMIN_EMAIL or not ADMIN_PASSWORD):
     raise RuntimeError('ADMIN_EMAIL, ADMIN_PASSWORD and JWT_SECRET must be configured in production')
+
+
+def is_valid_email(email):
+    return bool(email) and bool(EMAIL_RE.match(email))
+
+
+def issue_verification_code(email, user_id=None):
+    code = str(random.randint(100000, 999999))
+    expires_at = int(time.time() * 1000) + (15 * 60 * 1000)
+    with get_db() as conn:
+        if user_id is not None:
+            conn.execute('DELETE FROM email_verifications WHERE user_id = ?', (user_id,))
+        conn.execute(
+            'INSERT INTO email_verifications (id, user_id, email, code, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+            (str(uuid.uuid4()), user_id, email, code, expires_at, int(time.time() * 1000)),
+        )
+        conn.commit()
+    return code
+
+
+def send_verification_email(email, code):
+    smtp_host = os.getenv('SMTP_HOST', '').strip()
+    smtp_port = int(os.getenv('SMTP_PORT', '587') or 587)
+    smtp_user = os.getenv('SMTP_USERNAME', '').strip()
+    smtp_password = os.getenv('SMTP_PASSWORD', '').strip()
+    smtp_from = os.getenv('SMTP_FROM_EMAIL', smtp_user or 'noreply@localhost').strip()
+
+    if not smtp_host or not smtp_user or not smtp_password:
+        print(f'[EMAIL DEV MODE] Verification code for {email}: {code}')
+        return True
+
+    message = EmailMessage()
+    message['Subject'] = 'Код подтверждения для MURUM'
+    message['From'] = smtp_from
+    message['To'] = email
+    message.set_content(
+        f'Ваш код подтверждения: {code}\n\n'
+        'Вставьте его в форму регистрации на сайте.\n'
+        'Код действителен 15 минут.'
+    )
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port) as server:
+            if os.getenv('SMTP_USE_TLS', '1').strip() not in ('0', 'false', 'False'):
+                server.starttls()
+            if smtp_user and smtp_password:
+                server.login(smtp_user, smtp_password)
+            server.send_message(message)
+        return True
+    except Exception as exc:
+        print(f'[EMAIL SMTP ERROR] {exc}')
+        return False
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024
@@ -109,6 +165,24 @@ def init_db():
                     email TEXT NOT NULL UNIQUE,
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL DEFAULT 'user',
+                    email_verified INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL
+                )
+                '''
+            )
+
+            columns = [row[1] for row in conn.execute('PRAGMA table_info(users)').fetchall()]
+            if 'email_verified' not in columns:
+                conn.execute('ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0')
+
+            conn.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS email_verifications (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    email TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
                     created_at INTEGER NOT NULL
                 )
                 '''
@@ -167,8 +241,8 @@ def init_db():
             if ADMIN_EMAIL and ADMIN_PASSWORD and admin is None:
                 conn.execute(
                     '''
-                    INSERT INTO users (id, name, email, password_hash, role, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO users (id, name, email, password_hash, role, email_verified, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ''',
                     (
                         str(uuid.uuid4()),
@@ -176,14 +250,17 @@ def init_db():
                         ADMIN_EMAIL,
                         generate_password_hash(ADMIN_PASSWORD),
                         'admin',
+                        1,
                         int(time.time() * 1000),
                     ),
                 )
             elif admin is not None and ADMIN_PASSWORD:
                 conn.execute(
-                    'UPDATE users SET role = ?, password_hash = ? WHERE email = ?',
+                    'UPDATE users SET role = ?, password_hash = ?, email_verified = 1 WHERE email = ?',
                     ('admin', generate_password_hash(ADMIN_PASSWORD), ADMIN_EMAIL),
                 )
+
+            conn.execute('UPDATE users SET email_verified = 1 WHERE email_verified IS NULL')
 
             if ADMIN_EMAIL:
                 conn.execute(
@@ -223,6 +300,7 @@ def serialize_user(user):
         'name': user['name'],
         'email': user['email'],
         'role': user['role'],
+        'email_verified': bool(user.get('email_verified', 1)),
     }
 
 
@@ -281,7 +359,7 @@ def get_post_by_id(post_id, viewer_id=None):
 
         comments = conn.execute(
             '''
-            SELECT c.*, u.name AS author
+            SELECT c.*, u.name AS author, u.role AS author_role
             FROM comments c
             JOIN users u ON u.id = c.user_id
             WHERE c.post_id = ?
@@ -314,6 +392,7 @@ def get_post_by_id(post_id, viewer_id=None):
                 {
                     'id': comment['id'],
                     'author': comment['author'],
+                    'author_role': comment['author_role'],
                     'text': comment['text'],
                     'created_at': comment['created_at'],
                     'user_id': comment['user_id'],
@@ -338,25 +417,76 @@ def register():
 
     if not name or not email or not password:
         return jsonify({'message': 'Имя, email и пароль обязательны'}), 400
+    if not is_valid_email(email):
+        return jsonify({'message': 'Введите корректный email, например user@example.com'}), 400
     if len(password) < 6:
         return jsonify({'message': 'Пароль должен быть не короче 6 символов'}), 400
 
     with get_db() as conn:
-        existing = conn.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone()
+        existing = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
         if existing is not None:
-            return jsonify({'message': 'Пользователь с таким email уже существует'}), 409
+            if existing['email_verified'] == 1:
+                return jsonify({'message': 'Пользователь с таким email уже существует'}), 409
+            user_id = existing['id']
+            user_name = existing['name']
+            if name and name != user_name:
+                conn.execute('UPDATE users SET name = ? WHERE id = ?', (name, user_id))
+        else:
+            user_id = str(uuid.uuid4())
+            conn.execute(
+                '''
+                INSERT INTO users (id, name, email, password_hash, role, email_verified, created_at)
+                VALUES (?, ?, ?, ?, 'user', 0, ?)
+                ''',
+                (user_id, name, email, generate_password_hash(password), int(time.time() * 1000)),
+            )
+        code = issue_verification_code(email, user_id)
+        sent = send_verification_email(email, code)
+        conn.commit()
 
-        user_id = str(uuid.uuid4())
-        conn.execute(
-            '''
-            INSERT INTO users (id, name, email, password_hash, role, created_at)
-            VALUES (?, ?, ?, ?, 'user', ?)
-            ''',
-            (user_id, name, email, generate_password_hash(password), int(time.time() * 1000)),
-        )
-        user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    response = {
+        'status': 'pending_verification',
+        'email': email,
+        'message': 'Код подтверждения отправлен на почту.',
+    }
+    if not sent:
+        response['debug_code'] = code
+    return jsonify(response), 202
+
+
+@app.post('/api/auth/verify-email')
+def verify_email():
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip().lower()
+    code = (data.get('code') or '').strip()
+
+    if not email or not code:
+        return jsonify({'message': 'Email и код подтверждения обязательны'}), 400
+
+    now = int(time.time() * 1000)
+    with get_db() as conn:
+        record = conn.execute(
+            'SELECT * FROM email_verifications WHERE email = ? AND code = ? ORDER BY created_at DESC LIMIT 1',
+            (email, code),
+        ).fetchone()
+
+        if record is None:
+            return jsonify({'message': 'Неверный код подтверждения'}), 400
+        if record['expires_at'] < now:
+            conn.execute('DELETE FROM email_verifications WHERE email = ?', (email,))
+            conn.commit()
+            return jsonify({'message': 'Код подтверждения истёк. Запросите новый.'}), 400
+
+        user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+        if user is None:
+            return jsonify({'message': 'Пользователь не найден'}), 404
+
+        conn.execute('UPDATE users SET email_verified = 1 WHERE id = ?', (user['id'],))
+        conn.execute('DELETE FROM email_verifications WHERE email = ?', (email,))
+        conn.commit()
+
         token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role']}, JWT_SECRET, algorithm='HS256')
-        return jsonify({'token': token, 'user': serialize_user(user)}), 201
+        return jsonify({'token': token, 'user': serialize_user(user), 'message': 'Почта подтверждена'}), 200
 
 
 @app.post('/api/auth/login')
@@ -372,6 +502,8 @@ def login():
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
         if user is None or not check_password_hash(user['password_hash'], password):
             return jsonify({'message': 'Неверный email или пароль'}), 401
+        if user.get('email_verified') != 1:
+            return jsonify({'message': 'Email не подтверждён. Проверьте почту и введите код подтверждения.'}), 403
 
         token = jwt.encode({'id': user['id'], 'email': user['email'], 'role': user['role']}, JWT_SECRET, algorithm='HS256')
         return jsonify({'token': token, 'user': serialize_user(user)})
@@ -408,7 +540,7 @@ def list_posts():
         for post in posts:
             comments = conn.execute(
                 '''
-                SELECT c.*, u.name AS author
+                SELECT c.*, u.name AS author, u.role AS author_role
                 FROM comments c
                 JOIN users u ON u.id = c.user_id
                 WHERE c.post_id = ?
@@ -441,6 +573,7 @@ def list_posts():
                     {
                         'id': comment['id'],
                         'author': comment['author'],
+                        'author_role': comment['author_role'],
                         'text': comment['text'],
                         'created_at': comment['created_at'],
                         'user_id': comment['user_id'],

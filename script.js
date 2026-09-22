@@ -12,6 +12,7 @@ const state = {
   refreshing: false,
   postsRequestId: 0,
   editId: null,
+  pendingVerification: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -21,6 +22,7 @@ const searchInput = $('searchInput');
 const overlay = $('overlay');
 const viewOverlay = $('viewOverlay');
 const authOverlay = $('authOverlay');
+const welcomeOverlay = $('welcomeOverlay');
 const adminOverlay = $('adminOverlay');
 const titleInput = $('titleInput');
 const textInput = $('textInput');
@@ -31,6 +33,10 @@ const authNameWrap = $('authNameWrap');
 const authNameInput = $('authName');
 const authEmailInput = $('authEmail');
 const authPasswordInput = $('authPassword');
+const authCodeWrap = $('authCodeWrap');
+const authCodeInput = $('authCode');
+const authNote = $('authNote');
+const authTitle = $('authTitle');
 const authErrorBox = $('authError');
 const authSubmit = $('authSubmit');
 
@@ -174,7 +180,7 @@ async function loadPosts({ silent = false } = {}) {
 
 function createCard(post) {
   const card = document.createElement('article');
-  card.className = `card${post.id === state.newId ? ' new' : ''}`;
+  card.className = `card${post.author_role === 'admin' ? ' admin-post' : ''}${post.id === state.newId ? ' new' : ''}`;
   card.tabIndex = 0;
   card.setAttribute('role', 'button');
   card.setAttribute('aria-label', `Открыть объявление: ${post.title}`);
@@ -196,7 +202,10 @@ function createCard(post) {
 
   const h = document.createElement('h3');
   h.className = 'card-title';
-  h.textContent = post.title;
+  h.textContent = `${post.title}${post.author_role === 'admin' ? ' • Админ' : ''}`;
+  if (post.author_role === 'admin') {
+    h.classList.add('admin-headline');
+  }
   head.appendChild(h);
 
   if (state.user && post.own) {
@@ -326,7 +335,7 @@ function closeOverlay(element) {
   element.classList.remove('open');
   element.setAttribute('aria-hidden', 'true');
 
-  const anyOpen = [overlay, viewOverlay, authOverlay, adminOverlay, $('editOverlay')].some((item) => item.classList.contains('open'));
+  const anyOpen = [overlay, viewOverlay, authOverlay, welcomeOverlay, adminOverlay, $('editOverlay')].some((item) => item.classList.contains('open'));
   if (!anyOpen) body.style.overflow = '';
 }
 
@@ -354,15 +363,20 @@ overlay.addEventListener('click', (event) => {
 
 function openAuth(mode = 'login') {
   state.authMode = mode;
+  state.pendingVerification = null;
   authNameWrap.classList.toggle('hidden', mode !== 'register');
+  authCodeWrap.classList.add('hidden');
+  authNote.classList.add('hidden');
   authSubmit.textContent = mode === 'register' ? 'Создать аккаунт' : 'Войти';
   authTabs.querySelectorAll('.chip').forEach((chip) => {
     chip.classList.toggle('active', chip.dataset.auth === mode);
   });
   authErrorBox.textContent = '';
+  authTitle.textContent = mode === 'register' ? 'Регистрация' : 'Вход';
   authNameInput.value = '';
   authEmailInput.value = '';
   authPasswordInput.value = '';
+  authCodeInput.value = '';
   authEmailInput.setAttribute('autocomplete', 'username');
   authPasswordInput.setAttribute('autocomplete', mode === 'register' ? 'new-password' : 'current-password');
   openOverlay(authOverlay);
@@ -371,6 +385,17 @@ function openAuth(mode = 'login') {
 
 function closeAuth() {
   closeOverlay(authOverlay);
+}
+
+function setEmailVerificationState(email) {
+  state.pendingVerification = { email };
+  authCodeWrap.classList.remove('hidden');
+  authNote.classList.remove('hidden');
+  authNote.textContent = `Код отправлен на ${email}. Введите его ниже.`;
+  authTitle.textContent = 'Подтверждение почты';
+  authSubmit.textContent = 'Подтвердить код';
+  authCodeInput.value = '';
+  setTimeout(() => authCodeInput.focus(), 50);
 }
 
 $('authClose').addEventListener('click', closeAuth);
@@ -394,6 +419,7 @@ async function submitAuth() {
   const name = authNameInput.value.trim();
   const email = authEmailInput.value.trim();
   const password = authPasswordInput.value.trim();
+  const code = authCodeInput.value.trim();
 
   if (!email || !password) {
     authErrorBox.textContent = 'Введите email и пароль';
@@ -406,16 +432,40 @@ async function submitAuth() {
   }
 
   try {
-    const endpoint = state.authMode === 'register' ? '/auth/register' : '/auth/login';
-    const body = state.authMode === 'register' ? { name, email, password } : { email, password };
-    const result = await api(endpoint, {
+    if (state.authMode === 'register' && state.pendingVerification) {
+      if (!code) {
+        authErrorBox.textContent = 'Введите проверочный код из письма';
+        return;
+      }
+      const result = await api('/auth/verify-email', {
+        method: 'POST',
+        body: JSON.stringify({ email: state.pendingVerification.email, code }),
+      });
+      saveSession(result.token, result.user);
+      closeAuth();
+      showToast('Почта подтверждена');
+      await loadPosts();
+      return;
+    }
+
+    if (state.authMode === 'register') {
+      const result = await api('/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({ name, email, password }),
+      });
+      setEmailVerificationState(result.email);
+      authErrorBox.textContent = 'Сделано: код отправлен на почту.';
+      return;
+    }
+
+    const result = await api('/auth/login', {
       method: 'POST',
-      body: JSON.stringify(body),
+      body: JSON.stringify({ email, password }),
     });
 
     saveSession(result.token, result.user);
     closeAuth();
-    showToast(state.authMode === 'register' ? 'Аккаунт создан' : 'Вы вошли');
+    showToast('Вы вошли');
     await loadPosts();
   } catch (error) {
     authErrorBox.textContent = error.message || 'Не удалось выполнить действие';
@@ -541,6 +591,10 @@ adminOverlay.addEventListener('click', (event) => {
 document.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   if (authOverlay.classList.contains('open')) closeAuth();
+  else if (welcomeOverlay.classList.contains('open')) {
+    localStorage.setItem('murom_intro_seen', '1');
+    closeOverlay(welcomeOverlay);
+  }
   else if (adminOverlay.classList.contains('open')) closeAdmin();
   else if ($('editOverlay').classList.contains('open')) closeEdit();
   else if (viewOverlay.classList.contains('open')) closeView();
@@ -568,7 +622,8 @@ function renderView() {
     return;
   }
 
-  $('viewMeta').textContent = `${dayLabel(post.created_at)}, ${timeLabel(post.created_at)} · осталось ${leftLabel(post.expires_at)}`;
+  const isAdminPost = post.author_role === 'admin';
+  $('viewMeta').textContent = `${dayLabel(post.created_at)}, ${timeLabel(post.created_at)} · осталось ${leftLabel(post.expires_at)}${isAdminPost ? ' · объявление от админа' : ''}`;
   $('viewTitle').textContent = post.title;
   $('viewText').textContent = post.text;
   $('viewText').style.display = post.text ? '' : 'none';
@@ -588,13 +643,16 @@ function renderView() {
 
   post.comments.forEach((comment) => {
     const row = document.createElement('div');
-    row.className = 'comment';
+    row.className = `comment${comment.author_role === 'admin' ? ' admin-comment' : ''}`;
 
     const top = document.createElement('div');
     top.className = 'comment-top';
 
     const name = document.createElement('strong');
-    name.textContent = comment.author;
+    name.textContent = `${comment.author}${comment.author_role === 'admin' ? ' • Админ' : ''}`;
+    if (comment.author_role === 'admin') {
+      name.classList.add('admin-name');
+    }
 
     const when = document.createElement('span');
     when.textContent = stamp(comment.created_at);
@@ -814,8 +872,22 @@ async function init() {
 
   resetForm();
   await loadPosts();
+  const seenIntro = localStorage.getItem('murom_intro_seen');
+  if (!seenIntro) {
+    openOverlay($('welcomeOverlay'));
+  }
   startLiveRefresh();
 }
+
+$('welcomeClose').addEventListener('click', () => {
+  localStorage.setItem('murom_intro_seen', '1');
+  closeOverlay($('welcomeOverlay'));
+});
+
+$('welcomeConfirm').addEventListener('click', () => {
+  localStorage.setItem('murom_intro_seen', '1');
+  closeOverlay($('welcomeOverlay'));
+});
 
 function startLiveRefresh() {
   setInterval(async () => {
